@@ -1,0 +1,94 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared network so all services can reach each other by service name
+# ─────────────────────────────────────────────────────────────────────────────
+networks:
+  app-network:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent volume for PostgreSQL data
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  postgres-data:
+
+services:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 1. PostgreSQL — data storage
+  # ───────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      # hardcoded for prototype only
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: customer_db
+      POSTGRES_PORT: 5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d customer_db" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 2. Flask mock-server — customer data source (port 5000)
+  # ───────────────────────────────────────────────────────────────────────────
+  mock-server:
+    build:
+      context: ./mock-server
+      dockerfile: Dockerfile
+    container_name: mock-server
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:5000/api/health || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. FastAPI pipeline-service — ingestion pipeline (port 8000)
+  # ───────────────────────────────────────────────────────────────────────────
+  pipeline-service:
+    build:
+      context: ./pipeline-service
+      dockerfile: Dockerfile
+    container_name: pipeline-service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-server:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://postgres:password@postgres:5432/customer_db
+      MOCK_SERVER_URL: http://mock-server:5000
+      INGEST_PAGE_SIZE: "10"
+      HTTP_TIMEOUT: "30"
+    networks:
+      - app-network
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1" ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
